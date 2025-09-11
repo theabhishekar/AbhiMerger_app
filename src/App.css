@@ -122,6 +122,15 @@
   border: 1px solid #ddd;
   border-radius: 8px;
   margin: 20px 0;
+  transition: all 0.3s ease;
+}
+
+.table-container.expanded {
+  max-height: 80vh;
+  border: 2px solid #667eea;
+  box-shadow: 0 4px 20px rgba(102, 126, 234, 0.2);
+  position: relative;
+  z-index: 10;
 }
 
 .data-table {
@@ -156,16 +165,28 @@
   border-radius: 8px;
   margin: 8px 0;
   transition: all 0.3s ease;
+  user-select: none;
 }
 
-.pdf-item:hover {
+.pdf-item.clickable {
+  cursor: pointer;
+}
+
+.pdf-item.disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.pdf-item:hover:not(.disabled) {
   border-color: #667eea;
   background: rgba(102, 126, 234, 0.05);
+  transform: translateY(-1px);
 }
 
 .pdf-item.selected {
   border-color: #667eea;
-  background: rgba(102, 126, 234, 0.1);
+  background: rgba(102, 126, 234, 0.15);
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.2);
 }
 
 .pdf-item input[type="checkbox"] {

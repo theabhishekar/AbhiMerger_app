@@ -26,7 +26,8 @@ class ExcelProcessor {
           headers: jsonData[0] || [],
           rows: jsonData.slice(1),
           rowCount: jsonData.length - 1,
-          columnCount: jsonData[0]?.length || 0
+          columnCount: jsonData[0]?.length || 0,
+          worksheet: worksheet // Keep reference for hyperlink access
         };
       });
 
@@ -58,41 +59,77 @@ class ExcelProcessor {
     const seenPDFs = new Set();
 
     Object.entries(sheets).forEach(([sheetName, sheet]) => {
-      sheet.rows.forEach((row, rowIndex) => {
-        row.forEach((cell, colIndex) => {
-          if (typeof cell === 'string' && this.isPDFReference(cell)) {
-            const id = `${sheetName}_${rowIndex}_${colIndex}`;
+      // Check all cells in worksheet for hyperlinks
+      const worksheet = sheet.worksheet;
+      const range = XLSX.utils.decode_range(worksheet['!ref'] || 'A1:A1');
+      
+      for (let R = range.s.r; R <= range.e.r; R++) {
+        for (let C = range.s.c; C <= range.e.c; C++) {
+          const cellAddress = XLSX.utils.encode_cell({ r: R, c: C });
+          const cellObj = worksheet[cellAddress];
+          
+          if (!cellObj) continue;
+          
+          let pdfPath = null;
+          let source = 'text';
+          
+          // Check for hyperlinks first - try multiple hyperlink properties
+          if (cellObj.l) {
+            const hyperlinkTarget = cellObj.l.Target || cellObj.l.target || cellObj.l.Hyperlink;
+            console.log('Found hyperlink:', { cellAddress, cellValue: cellObj.v, hyperlinkTarget });
+            if (hyperlinkTarget && this.isPDFReference(hyperlinkTarget)) {
+              pdfPath = this.cleanHyperlinkPath(hyperlinkTarget);
+              source = 'hyperlink';
+              console.log('PDF hyperlink detected:', { cellAddress, pdfPath, source });
+            }
+          }
+          
+          // Fallback to cell text content
+          if (!pdfPath && cellObj.v && typeof cellObj.v === 'string' && this.isPDFReference(cellObj.v)) {
+            pdfPath = cellObj.v;
+            source = 'text';
+          }
+          
+          if (pdfPath) {
+            const id = `${sheetName}_${R}_${C}`;
             
             // Avoid duplicates
             if (!seenPDFs.has(id)) {
               seenPDFs.add(id);
-              const type = this.getPDFType(cell);
+              const type = this.getPDFType(pdfPath);
               pdfReferences.push({
                 id,
-                path: cell,
+                path: pdfPath,
                 type,
+                source,
                 sheet: sheetName,
-                row: rowIndex + 2, // +2 because we start from 1 and skip header
-                column: colIndex + 1,
-                columnName: sheet.headers[colIndex] || `Column ${colIndex + 1}`,
+                row: R + 1,
+                column: C + 1,
+                columnName: sheet.headers[C] || `Column ${C + 1}`,
                 icon: this.getTypeIcon(type),
                 exists: false, // Will be validated later
                 selected: false
               });
+              console.log('PDF reference created:', { id, cellValue: cellObj.v, pdfPath, source });
             }
           }
-        });
-      });
+        }
+      }
     });
 
     return pdfReferences;
   }
 
-  isPDFReference(cell) {
-    return cell.toLowerCase().includes('.pdf') || 
-           cell.includes('drive.google.com/file/d/') ||
-           cell.includes('dropbox.com/s/') ||
-           cell.includes('onedrive.live.com');
+  isPDFReference(path) {
+    const lowerPath = path.toLowerCase();
+    return lowerPath.includes('.pdf') || 
+           path.includes('drive.google.com/file/d/') ||
+           path.includes('drive.google.com/open?id=') ||
+           path.includes('docs.google.com/document/d/') ||
+           path.includes('dropbox.com/s/') ||
+           path.includes('dropbox.com/scl/') ||
+           path.includes('onedrive.live.com') ||
+           path.includes('1drv.ms/');
   }
 
   getPDFType(path) {
@@ -105,6 +142,26 @@ class ExcelProcessor {
     if (path.startsWith('\\\\')) return 'network-path';
     if (path.startsWith('./') || path.startsWith('../')) return 'relative-path';
     return 'local-path';
+  }
+
+  cleanHyperlinkPath(hyperlinkPath) {
+    let cleanPath = hyperlinkPath;
+    
+    // Remove https:// prefix that Excel adds to local paths
+    if (cleanPath.startsWith("https://'") && cleanPath.endsWith("'")) {
+      cleanPath = cleanPath.slice(9, -1); // Remove https://' and trailing '
+    } else if (cleanPath.startsWith("https://") && (cleanPath.includes('/Users/') || cleanPath.includes('/home/') || cleanPath.match(/^https:\/\/[A-Z]:/))) {
+      cleanPath = cleanPath.slice(8); // Remove https:// for local paths
+    }
+    
+    // Decode URL encoding
+    try {
+      cleanPath = decodeURIComponent(cleanPath);
+    } catch (e) {
+      // If decoding fails, use original
+    }
+    
+    return cleanPath;
   }
 
   getTypeIcon(type) {

@@ -6,6 +6,8 @@ const DataTable = ({ data, onNext, onBack, onMergeComplete }) => {
   const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
   const [selectedPDFs, setSelectedPDFs] = useState([]);
   const [isMerging, setIsMerging] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [rowLimit, setRowLimit] = useState(100);
 
   const currentSheet = data.sheets[selectedSheet];
   
@@ -19,18 +21,24 @@ const DataTable = ({ data, onNext, onBack, onMergeComplete }) => {
     );
   }, [currentSheet.rows, searchTerm]);
 
-  const sortedData = useMemo(() => {
-    if (!sortConfig.key) return filteredData;
+  const sortedDataWithIndices = useMemo(() => {
+    // Create array with original indices
+    const dataWithIndices = filteredData.map((row, index) => ({
+      row,
+      originalIndex: currentSheet.rows.indexOf(row)
+    }));
     
-    return [...filteredData].sort((a, b) => {
-      const aVal = a[sortConfig.key] || '';
-      const bVal = b[sortConfig.key] || '';
+    if (!sortConfig.key) return dataWithIndices;
+    
+    return [...dataWithIndices].sort((a, b) => {
+      const aVal = a.row[sortConfig.key] || '';
+      const bVal = b.row[sortConfig.key] || '';
       
       if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
       if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
       return 0;
     });
-  }, [filteredData, sortConfig]);
+  }, [filteredData, sortConfig, currentSheet.rows]);
 
   const handleSort = (columnIndex) => {
     setSortConfig(prev => ({
@@ -47,24 +55,74 @@ const DataTable = ({ data, onNext, onBack, onMergeComplete }) => {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  const handlePDFClick = (cellValue, rowIndex, cellIndex) => {
+  const isPDFReference = (path) => {
+    if (!path || typeof path !== 'string') return false;
+    const lowerPath = path.toLowerCase();
+    return lowerPath.includes('.pdf') || 
+           path.includes('drive.google.com/file/d/') ||
+           path.includes('drive.google.com/open?id=') ||
+           path.includes('docs.google.com/document/d/') ||
+           path.includes('dropbox.com/s/') ||
+           path.includes('dropbox.com/scl/') ||
+           path.includes('onedrive.live.com') ||
+           path.includes('1drv.ms/');
+  };
+
+  const getCellHyperlink = (rowIndex, cellIndex) => {
+    // Find matching PDF reference from the processed data
     const pdfId = `${selectedSheet}_${rowIndex}_${cellIndex}`;
-    const pdfPath = {
-      id: pdfId,
-      path: cellValue,
-      sheet: selectedSheet,
-      row: rowIndex + 2,
-      column: cellIndex + 1,
-      columnName: currentSheet.headers[cellIndex] || `Column ${cellIndex + 1}`
-    };
+    const pdfRef = data.pdfReferences.find(ref => ref.id === pdfId);
+    return pdfRef && pdfRef.source === 'hyperlink' ? pdfRef.path : null;
+  };
+
+  const cleanHyperlinkPath = (hyperlinkPath) => {
+    if (!hyperlinkPath) return hyperlinkPath;
+    
+    let cleanPath = hyperlinkPath;
+    
+    // Remove https:// prefix that Excel adds to local paths
+    if (cleanPath.startsWith("https://'") && cleanPath.endsWith("'")) {
+      cleanPath = cleanPath.slice(9, -1);
+    } else if (cleanPath.startsWith("https://") && (cleanPath.includes('/Users/') || cleanPath.includes('/home/') || cleanPath.match(/^https:\/\/[A-Z]:/))) {
+      cleanPath = cleanPath.slice(8);
+    }
+    
+    // Decode URL encoding
+    try {
+      cleanPath = decodeURIComponent(cleanPath);
+    } catch (e) {
+      // If decoding fails, use original
+    }
+    
+    return cleanPath;
+  };
+
+  const handlePDFClick = (originalRowIndex, cellIndex, event) => {
+    if (event) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    
+    const actualRowIndex = originalRowIndex + 1;
+    const pdfId = `${selectedSheet}_${actualRowIndex}_${cellIndex}`;
+    const pdfRef = data.pdfReferences.find(ref => ref.id === pdfId);
+    
+    console.log('PDF click attempt:', { originalRowIndex, cellIndex, pdfId, pdfRef });
+    
+    if (!pdfRef) {
+      console.log('No PDF reference found for:', pdfId);
+      return;
+    }
+    
+    console.log('PDF clicked successfully:', pdfRef);
     
     setSelectedPDFs(prev => {
       const exists = prev.find(pdf => pdf.id === pdfId);
-      if (exists) {
-        return prev.filter(pdf => pdf.id !== pdfId);
-      } else {
-        return [...prev, pdfPath];
-      }
+      const newSelection = exists 
+        ? prev.filter(pdf => pdf.id !== pdfId)
+        : [...prev, pdfRef];
+      console.log('Updated selection:', newSelection);
+      return newSelection;
     });
   };
 
@@ -97,24 +155,21 @@ const DataTable = ({ data, onNext, onBack, onMergeComplete }) => {
     }
   };
 
-  const isPDFSelected = (rowIndex, cellIndex) => {
-    const pdfId = `${selectedSheet}_${rowIndex}_${cellIndex}`;
+  const isPDFSelected = (originalRowIndex, cellIndex) => {
+    const actualRowIndex = originalRowIndex + 1;
+    const pdfId = `${selectedSheet}_${actualRowIndex}_${cellIndex}`;
     return selectedPDFs.some(pdf => pdf.id === pdfId);
   };
 
-  const handleSelectRow = (rowIndex) => {
+  const handleSelectRow = (originalRowIndex) => {
     const rowPDFs = [];
-    sortedData[rowIndex].forEach((cell, cellIndex) => {
-      if (cell && cell.toString().includes('.pdf')) {
-        const pdfId = `${selectedSheet}_${rowIndex}_${cellIndex}`;
-        rowPDFs.push({
-          id: pdfId,
-          path: cell,
-          sheet: selectedSheet,
-          row: rowIndex + 2,
-          column: cellIndex + 1,
-          columnName: currentSheet.headers[cellIndex] || `Column ${cellIndex + 1}`
-        });
+    const row = currentSheet.rows[originalRowIndex];
+    row.forEach((cell, cellIndex) => {
+      const actualRowIndex = originalRowIndex + 1;
+      const pdfId = `${selectedSheet}_${actualRowIndex}_${cellIndex}`;
+      const pdfRef = data.pdfReferences.find(ref => ref.id === pdfId);
+      if (pdfRef) {
+        rowPDFs.push(pdfRef);
       }
     });
     
@@ -137,18 +192,12 @@ const DataTable = ({ data, onNext, onBack, onMergeComplete }) => {
 
   const handleSelectColumn = (columnIndex) => {
     const colPDFs = [];
-    sortedData.forEach((row, rowIndex) => {
-      const cell = row[columnIndex];
-      if (cell && cell.toString().includes('.pdf')) {
-        const pdfId = `${selectedSheet}_${rowIndex}_${columnIndex}`;
-        colPDFs.push({
-          id: pdfId,
-          path: cell,
-          sheet: selectedSheet,
-          row: rowIndex + 2,
-          column: columnIndex + 1,
-          columnName: currentSheet.headers[columnIndex] || `Column ${columnIndex + 1}`
-        });
+    currentSheet.rows.forEach((row, rowIndex) => {
+      const actualRowIndex = rowIndex + 1;
+      const pdfId = `${selectedSheet}_${actualRowIndex}_${columnIndex}`;
+      const pdfRef = data.pdfReferences.find(ref => ref.id === pdfId);
+      if (pdfRef) {
+        colPDFs.push(pdfRef);
       }
     });
     
@@ -169,11 +218,16 @@ const DataTable = ({ data, onNext, onBack, onMergeComplete }) => {
     });
   };
 
-  const isRowSelected = (rowIndex) => {
+  const isRowSelected = (originalRowIndex) => {
     const rowPDFs = [];
-    sortedData[rowIndex].forEach((cell, cellIndex) => {
-      if (cell && cell.toString().includes('.pdf')) {
-        const pdfId = `${selectedSheet}_${rowIndex}_${cellIndex}`;
+    const row = currentSheet.rows[originalRowIndex];
+    if (!row) return false;
+    
+    row.forEach((cell, cellIndex) => {
+      const actualRowIndex = originalRowIndex + 1;
+      const pdfId = `${selectedSheet}_${actualRowIndex}_${cellIndex}`;
+      const pdfRef = data.pdfReferences.find(ref => ref.id === pdfId);
+      if (pdfRef) {
         rowPDFs.push(pdfId);
       }
     });
@@ -182,10 +236,14 @@ const DataTable = ({ data, onNext, onBack, onMergeComplete }) => {
 
   const isColumnSelected = (columnIndex) => {
     const colPDFs = [];
-    sortedData.forEach((row, rowIndex) => {
-      const cell = row[columnIndex];
-      if (cell && cell.toString().includes('.pdf')) {
-        const pdfId = `${selectedSheet}_${rowIndex}_${columnIndex}`;
+    if (!currentSheet.rows) return false;
+    
+    currentSheet.rows.forEach((row, rowIndex) => {
+      if (!row || !row[columnIndex]) return;
+      const actualRowIndex = rowIndex + 1;
+      const pdfId = `${selectedSheet}_${actualRowIndex}_${columnIndex}`;
+      const pdfRef = data.pdfReferences.find(ref => ref.id === pdfId);
+      if (pdfRef) {
         colPDFs.push(pdfId);
       }
     });
@@ -245,8 +303,54 @@ const DataTable = ({ data, onNext, onBack, onMergeComplete }) => {
         />
       </div>
 
+      {/* Table Controls */}
+      <div style={{ margin: '20px 0', display: 'flex', gap: '15px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <span 
+          onClick={() => setIsExpanded(true)}
+          style={{
+            fontSize: '16px',
+            cursor: 'pointer',
+            padding: '6px 12px',
+            borderRadius: '4px',
+            transition: 'all 0.2s ease',
+            userSelect: 'none',
+            display: 'inline-flex',
+            alignItems: 'center',
+            backgroundColor: 'rgba(102, 126, 234, 0.1)',
+            border: '1px solid #667eea'
+          }}
+          title="Open full Excel view in popup"
+        >
+          ⛶ View Full File
+        </span>
+        
+        {!isExpanded && sortedDataWithIndices.length > 100 && (
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <label>Show rows:</label>
+            <select 
+              value={rowLimit} 
+              onChange={(e) => setRowLimit(Number(e.target.value))}
+              style={{ padding: '4px 8px', borderRadius: '4px', border: '1px solid #ddd' }}
+            >
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+              <option value={200}>200</option>
+              <option value={500}>500</option>
+              <option value={sortedDataWithIndices.length}>All ({sortedDataWithIndices.length})</option>
+            </select>
+          </div>
+        )}
+        
+        <span style={{ color: '#666', fontSize: '14px' }}>
+          {isExpanded ? `Showing all ${sortedDataWithIndices.length} rows` : `Showing ${Math.min(rowLimit, sortedDataWithIndices.length)} of ${sortedDataWithIndices.length} rows`}
+        </span>
+      </div>
+
       {/* Data Table */}
-      <div className="table-container">
+      <div className={`table-container ${isExpanded ? 'expanded' : ''}`} style={{
+        maxHeight: isExpanded ? '80vh' : '400px',
+        border: isExpanded ? '2px solid #667eea' : '1px solid #ddd'
+      }}>
         <table className="data-table">
           <thead>
             <tr>
@@ -277,40 +381,63 @@ const DataTable = ({ data, onNext, onBack, onMergeComplete }) => {
             </tr>
           </thead>
           <tbody>
-            {sortedData.slice(0, 100).map((row, rowIndex) => (
-              <tr key={rowIndex}>
+            {sortedDataWithIndices.slice(0, isExpanded ? sortedDataWithIndices.length : rowLimit).map(({ row, originalIndex }, displayIndex) => (
+              <tr key={displayIndex}>
                 <td style={{ textAlign: 'center', width: '40px' }}>
-                  <input
-                    type="checkbox"
-                    checked={isRowSelected(rowIndex)}
-                    onChange={() => handleSelectRow(rowIndex)}
-                  />
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                    <input
+                      type="checkbox"
+                      checked={isRowSelected(originalIndex)}
+                      onChange={() => handleSelectRow(originalIndex)}
+                    />
+                    <small style={{ fontSize: '10px', color: '#666' }}>{originalIndex + 2}</small>
+                  </div>
                 </td>
                 {row.map((cell, cellIndex) => {
-                  const isPDF = cell && cell.toString().includes('.pdf');
-                  const isSelected = isPDF && isPDFSelected(rowIndex, cellIndex);
+                  // Use original row index for PDF ID matching
+                  const actualRowIndex = originalIndex + 1; // +1 because ExcelProcessor skips header row
+                  const pdfId = `${selectedSheet}_${actualRowIndex}_${cellIndex}`;
+                  const pdfRef = data.pdfReferences.find(ref => ref.id === pdfId);
+                  
+                  // Debug for abhi cell
+                  if (cell === 'abhi') {
+                    console.log('Abhi cell ID calculation:', { originalIndex, actualRowIndex, cellIndex, pdfId, foundRef: !!pdfRef });
+                  }
+                  const isPDF = !!pdfRef;
+                  const isSelected = isPDF && isPDFSelected(originalIndex, cellIndex);
+                  const isHyperlink = pdfRef && pdfRef.source === 'hyperlink';
+                  
+                  // Debug logging for cells that might have hyperlinks
+                  if (cell === 'abhi' || (cell && cell.toString().toLowerCase().includes('abhi'))) {
+                    console.log('Debug cell "abhi":', { cell, pdfId, pdfRef, isPDF });
+                  }
                   
                   return (
                     <td key={cellIndex}>
                       {isPDF ? (
-                        <span 
+                        <div 
                           style={{ 
                             background: isSelected ? 'rgba(102, 126, 234, 0.3)' : 'rgba(102, 126, 234, 0.1)', 
-                            padding: '4px 8px', 
-                            borderRadius: '4px',
-                            fontFamily: 'monospace',
+                            padding: '4px 6px', 
+                            borderRadius: '3px',
                             cursor: 'pointer',
-                            border: isSelected ? '2px solid #667eea' : '1px solid transparent',
+                            border: isSelected ? '1px solid #667eea' : '1px solid rgba(102, 126, 234, 0.3)',
+                            transition: 'all 0.2s ease',
+                            userSelect: 'none',
                             display: 'inline-block',
-                            transition: 'all 0.2s ease'
+                            fontSize: '13px'
                           }}
-                          onClick={() => handlePDFClick(cell, rowIndex, cellIndex)}
-                          title={isSelected ? 'Click to deselect' : 'Click to select for merging'}
+                          onClick={(e) => handlePDFClick(originalIndex, cellIndex, e)}
+                          title={`${isSelected ? 'Click to deselect' : 'Click to select for merging'}\n${isHyperlink ? `Hyperlink: ${pdfRef.path}` : `Path: ${pdfRef.path}`}`}
                         >
-                          {isSelected ? '✅' : '📄'} {cell}
-                        </span>
+                          <span style={{ fontWeight: isSelected ? 'bold' : 'normal' }}>
+                            {isSelected ? '✅ ' : ''}{cell || 'PDF'}
+                          </span>
+                        </div>
                       ) : (
-                        cell || ''
+                        <div style={{ padding: '4px 6px' }}>
+                          {cell || ''}
+                        </div>
                       )}
                     </td>
                   );
@@ -321,10 +448,18 @@ const DataTable = ({ data, onNext, onBack, onMergeComplete }) => {
         </table>
       </div>
 
-      {sortedData.length > 100 && (
-        <p style={{ textAlign: 'center', color: '#666', marginTop: '10px' }}>
-          Showing first 100 rows of {sortedData.length} total rows
-        </p>
+      {!isExpanded && sortedDataWithIndices.length > rowLimit && (
+        <div style={{ textAlign: 'center', margin: '15px 0' }}>
+          <p style={{ color: '#666', marginBottom: '10px' }}>
+            Showing {rowLimit} of {sortedDataWithIndices.length} total rows
+          </p>
+          <button 
+            className="button secondary"
+            onClick={() => setRowLimit(Math.min(rowLimit + 100, sortedDataWithIndices.length))}
+          >
+            Load More Rows
+          </button>
+        </div>
       )}
 
       {/* PDF References Summary */}
@@ -392,6 +527,151 @@ const DataTable = ({ data, onNext, onBack, onMergeComplete }) => {
           </button>
         </div>
       </div>
+
+      {/* Full Excel View Modal */}
+      {isExpanded && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.8)',
+          zIndex: 1000,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '20px'
+        }}>
+          <div style={{
+            backgroundColor: 'white',
+            borderRadius: '12px',
+            width: '95vw',
+            height: '90vh',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            boxShadow: '0 20px 60px rgba(0, 0, 0, 0.3)'
+          }}>
+            {/* Modal Header */}
+            <div style={{
+              padding: '20px',
+              borderBottom: '1px solid #ddd',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              backgroundColor: '#f8f9fa'
+            }}>
+              <h3 style={{ margin: 0, color: '#333' }}>Full Excel View - {data.fileName}</h3>
+              <button 
+                onClick={() => setIsExpanded(false)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  fontSize: '24px',
+                  cursor: 'pointer',
+                  padding: '5px',
+                  borderRadius: '4px'
+                }}
+                title="Close full view"
+              >
+                ✕
+              </button>
+            </div>
+            
+            {/* Modal Search */}
+            <div style={{ padding: '15px 20px', borderBottom: '1px solid #eee' }}>
+              <input
+                type="text"
+                placeholder="Search in full Excel view..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                style={{
+                  width: '30%',
+                  padding: '10px',
+                  border: '1px solid #ddd',
+                  borderRadius: '6px',
+                  fontSize: '14px'
+                }}
+              />
+            </div>
+            
+            {/* Modal Content - Full Table */}
+            <div style={{ flex: 1, overflow: 'auto', padding: '20px' }}>
+              <table className="data-table" style={{ width: '100%' }}>
+                <thead>
+                  <tr>
+                    <th style={{ width: '40px', textAlign: 'center' }}>Row</th>
+                    {currentSheet.headers.map((header, index) => (
+                      <th key={index} style={{ textAlign: 'center', minWidth: '120px' }}>
+                        <div>
+                          <input
+                            type="checkbox"
+                            checked={isColumnSelected(index)}
+                            onChange={() => handleSelectColumn(index)}
+                            style={{ marginBottom: '5px' }}
+                          />
+                          <div>{header || `Column ${index + 1}`}</div>
+                        </div>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedDataWithIndices.map(({ row, originalIndex }, displayIndex) => (
+                    <tr key={displayIndex}>
+                      <td style={{ textAlign: 'center', width: '40px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                          <input
+                            type="checkbox"
+                            checked={isRowSelected(originalIndex)}
+                            onChange={() => handleSelectRow(originalIndex)}
+                          />
+                          <small style={{ fontSize: '10px', color: '#666', fontWeight: 'bold' }}>{originalIndex + 2}</small>
+                        </div>
+                      </td>
+                      {row.map((cell, cellIndex) => {
+                        const actualRowIndex = originalIndex + 1;
+                        const pdfId = `${selectedSheet}_${actualRowIndex}_${cellIndex}`;
+                        const pdfRef = data.pdfReferences.find(ref => ref.id === pdfId);
+                        const isPDF = !!pdfRef;
+                        const isSelected = isPDF && isPDFSelected(originalIndex, cellIndex);
+                        const isHyperlink = pdfRef && pdfRef.source === 'hyperlink';
+                        
+                        return (
+                          <td key={cellIndex} style={{ minWidth: '120px', maxWidth: '300px' }}>
+                            {isPDF ? (
+                              <div 
+                                style={{ 
+                                  background: isSelected ? 'rgba(102, 126, 234, 0.3)' : 'rgba(102, 126, 234, 0.1)', 
+                                  padding: '3px 5px', 
+                                  borderRadius: '3px',
+                                  cursor: 'pointer',
+                                  border: isSelected ? '1px solid #667eea' : '1px solid rgba(102, 126, 234, 0.3)',
+                                  fontSize: '12px',
+                                  display: 'inline-block'
+                                }}
+                                onClick={(e) => handlePDFClick(originalIndex, cellIndex, e)}
+                                title={`${isSelected ? 'Selected' : 'Click to select'} - ${pdfRef.path}`}
+                              >
+                                {isSelected ? '✅ ' : ''}{cell || 'PDF'}
+                              </div>
+                            ) : (
+                              <div style={{ padding: '3px 5px', fontSize: '12px', wordBreak: 'break-word' }}>
+                                {cell || ''}
+                              </div>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

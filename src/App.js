@@ -32,17 +32,19 @@ function App() {
   };
 
   const handlePDFSelection = (pdfs) => {
+    console.log('Selected PDFs:', pdfs);
     setSelectedPDFs(pdfs);
-    setCurrentStep(3);
   };
 
   const handleStartMerge = async () => {
+    console.log('Starting merge with PDFs:', selectedPDFs);
     setCurrentStep(4);
     setMergeProgress({ status: 'Starting merge...', percentage: 0 });
     
     try {
       const outputPath = await window.electronAPI.savePDFDialog();
       if (outputPath) {
+        console.log('Output path:', outputPath);
         const result = await window.electronAPI.mergePDFs(selectedPDFs, outputPath);
         setMergedPDFPath(result.outputPath);
       }

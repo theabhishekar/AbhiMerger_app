@@ -95,15 +95,54 @@ const PDFSelector = ({ pdfReferences, onSelection, onBack, onNext }) => {
   };
 
   const handlePDFToggle = (pdfId) => {
-    setSelectedPDFs(prev => 
-      prev.includes(pdfId) 
+    console.log('Toggling PDF:', pdfId);
+    setSelectedPDFs(prev => {
+      const newSelection = prev.includes(pdfId) 
         ? prev.filter(id => id !== pdfId)
-        : [...prev, pdfId]
-    );
+        : [...prev, pdfId];
+      console.log('New selection:', newSelection);
+      
+      // Update parent with current selection
+      const selectedPDFData = pdfReferences.filter(pdf => newSelection.includes(pdf.id));
+      onSelection(selectedPDFData);
+      
+      return newSelection;
+    });
+  };
+
+  const handleBatchSelect = (startIndex, endIndex) => {
+    const validPDFs = pdfReferences.filter(pdf => validationResults[pdf.id]?.exists);
+    const batchPDFs = validPDFs.slice(startIndex, endIndex);
+    setSelectedPDFs(batchPDFs.map(pdf => pdf.id));
   };
 
   const handleNext = () => {
     const selectedPDFData = pdfReferences.filter(pdf => selectedPDFs.includes(pdf.id));
+    console.log('Passing selected PDFs to parent:', selectedPDFData);
+    
+    // Check for potential issues
+    const networkPDFs = selectedPDFData.filter(pdf => 
+      pdf.type.includes('web') || pdf.type.includes('drive') || pdf.type.includes('dropbox')
+    ).length;
+    
+    if (selectedPDFData.length > 20) {
+      const proceed = window.confirm(
+        `You've selected ${selectedPDFData.length} PDFs. This may cause memory issues.\n\n` +
+        `Recommended: Process in batches of 10-15 PDFs.\n\n` +
+        `Continue anyway?`
+      );
+      if (!proceed) return;
+    }
+    
+    if (networkPDFs > 5) {
+      const proceed = window.confirm(
+        `You've selected ${networkPDFs} web/cloud PDFs. This may be slow and unreliable.\n\n` +
+        `Recommended: Use local files when possible.\n\n` +
+        `Continue anyway?`
+      );
+      if (!proceed) return;
+    }
+    
     onSelection(selectedPDFData);
     onNext();
   };
@@ -214,6 +253,41 @@ const PDFSelector = ({ pdfReferences, onSelection, onBack, onNext }) => {
         </button>
       </div>
 
+      {/* Batch Processing Warning */}
+      {selectedPDFs.length > 15 && (
+        <div style={{ 
+          margin: '20px 0', 
+          padding: '15px', 
+          background: '#fff3cd', 
+          border: '1px solid #ffeaa7', 
+          borderRadius: '8px',
+          color: '#856404'
+        }}>
+          <h4 style={{ margin: '0 0 10px 0' }}>⚠️ Large Batch Detected ({selectedPDFs.length} PDFs)</h4>
+          <p style={{ margin: '0 0 10px 0' }}>For better performance and reliability, consider processing in smaller batches:</p>
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+            <button 
+              className="button secondary" 
+              onClick={() => handleBatchSelect(0, 10)}
+            >
+              Select First 10
+            </button>
+            <button 
+              className="button secondary" 
+              onClick={() => handleBatchSelect(10, 20)}
+            >
+              Select Next 10
+            </button>
+            <button 
+              className="button secondary" 
+              onClick={() => handleBatchSelect(20, 30)}
+            >
+              Select Next 10
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Row/Column Selection */}
       <div style={{ margin: '20px 0' }}>
         <h4>Select by Row/Column:</h4>
@@ -277,14 +351,19 @@ const PDFSelector = ({ pdfReferences, onSelection, onBack, onNext }) => {
           return (
             <div 
               key={pdf.id} 
-              className={`pdf-item ${isSelected ? 'selected' : ''}`}
-              style={{ opacity: isValid ? 1 : 0.6 }}
+              className={`pdf-item ${isSelected ? 'selected' : ''} ${isValid ? 'clickable' : 'disabled'}`}
+              style={{ opacity: isValid ? 1 : 0.6, cursor: isValid ? 'pointer' : 'not-allowed' }}
+              onClick={() => isValid && handlePDFToggle(pdf.id)}
             >
               <input
                 type="checkbox"
                 checked={isSelected}
-                onChange={() => handlePDFToggle(pdf.id)}
+                onChange={(e) => {
+                  e.stopPropagation();
+                  handlePDFToggle(pdf.id);
+                }}
                 disabled={!isValid}
+                style={{ cursor: 'pointer' }}
               />
               
               <span className="pdf-icon">{pdf.icon}</span>
@@ -321,11 +400,12 @@ const PDFSelector = ({ pdfReferences, onSelection, onBack, onNext }) => {
             {selectedPDFs.length} PDFs selected
           </span>
           <button 
-            className="button" 
+            className={`button ${selectedPDFs.length > 15 ? 'danger' : ''}`}
             onClick={handleNext}
             disabled={selectedPDFs.length === 0}
+            title={selectedPDFs.length > 15 ? 'Large batch - consider splitting for better performance' : ''}
           >
-            Merge Selected PDFs →
+            {selectedPDFs.length > 20 ? '⚠️ ' : ''}Merge Selected PDFs →
           </button>
         </div>
       </div>

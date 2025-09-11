@@ -1,18 +1,25 @@
 const { PDFDocument } = require('pdf-lib');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const axios = require('axios');
 const { BrowserWindow } = require('electron');
 
 class PDFMerger {
   constructor() {
-    this.tempDir = path.join(__dirname, '../../temp');
+    this.tempDir = path.join(os.tmpdir(), 'abhimerger-temp');
     this.ensureTempDir();
   }
 
   ensureTempDir() {
-    if (!fs.existsSync(this.tempDir)) {
-      fs.mkdirSync(this.tempDir, { recursive: true });
+    try {
+      if (!fs.existsSync(this.tempDir)) {
+        fs.mkdirSync(this.tempDir, { recursive: true });
+      }
+    } catch (error) {
+      console.error('Failed to create temp directory:', error);
+      // Fallback to system temp directory
+      this.tempDir = os.tmpdir();
     }
   }
 
@@ -47,10 +54,16 @@ class PDFMerger {
             result.accessible = stats.isFile();
             result.size = stats.size;
           }
-        } else if (pdfPath.type.includes('web') || pdfPath.type.includes('drive') || pdfPath.type.includes('dropbox')) {
+        } else if (pdfPath.type.includes('web') || pdfPath.type.includes('drive') || pdfPath.type.includes('dropbox') || pdfPath.type.includes('onedrive')) {
           // Check if URL is accessible
           try {
-            const response = await axios.head(this.convertToDirectDownload(pdfPath.path), { timeout: 5000 });
+            const directUrl = this.convertToDirectDownload(pdfPath.path);
+            const response = await axios.head(directUrl, { 
+              timeout: 10000,
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+              }
+            });
             result.exists = response.status === 200;
             result.accessible = true;
             result.size = parseInt(response.headers['content-length'] || '0');
@@ -93,22 +106,33 @@ class PDFMerger {
 
         try {
           let pdfBytes;
-          let actualPath = pdfPath.path;
           
-          // Check if file exists
-          if (!fs.existsSync(actualPath)) {
-            console.log('File not found, trying relative path:', actualPath);
-            // Try as relative path from current directory
-            const relativePath = path.resolve(process.cwd(), actualPath);
-            if (fs.existsSync(relativePath)) {
-              actualPath = relativePath;
-            } else {
-              throw new Error(`File not found: ${actualPath}`);
+          if (pdfPath.type.includes('web') || pdfPath.type.includes('drive') || pdfPath.type.includes('dropbox') || pdfPath.type.includes('onedrive')) {
+            // Download from web/cloud
+            console.log('Downloading PDF from:', pdfPath.path);
+            pdfBytes = await this.downloadPDF(pdfPath.path);
+          } else {
+            // Local file handling
+            let actualPath = pdfPath.path;
+            
+            if (pdfPath.type === 'relative-path') {
+              actualPath = path.resolve(path.dirname(pdfPath.excelPath || ''), pdfPath.path);
             }
-          }
+            
+            // Check if file exists
+            if (!fs.existsSync(actualPath)) {
+              console.log('File not found, trying relative path:', actualPath);
+              const relativePath = path.resolve(process.cwd(), actualPath);
+              if (fs.existsSync(relativePath)) {
+                actualPath = relativePath;
+              } else {
+                throw new Error(`File not found: ${actualPath}`);
+              }
+            }
 
-          console.log('Reading PDF from:', actualPath);
-          pdfBytes = fs.readFileSync(actualPath);
+            console.log('Reading PDF from:', actualPath);
+            pdfBytes = fs.readFileSync(actualPath);
+          }
           
           if (!pdfBytes || pdfBytes.length === 0) {
             throw new Error('PDF file is empty or corrupted');
@@ -170,29 +194,79 @@ class PDFMerger {
 
   async downloadPDF(url) {
     const directUrl = this.convertToDirectDownload(url);
-    const response = await axios.get(directUrl, {
-      responseType: 'arraybuffer',
-      timeout: 30000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    });
+    console.log('Downloading from:', directUrl);
     
-    return Buffer.from(response.data);
+    try {
+      const response = await axios.get(directUrl, {
+        responseType: 'arraybuffer',
+        timeout: 60000,
+        maxRedirects: 10,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+      });
+      
+      console.log('Download response status:', response.status);
+      console.log('Content type:', response.headers['content-type']);
+      console.log('Content length:', response.headers['content-length']);
+      
+      // Check if response is actually a PDF
+      const buffer = Buffer.from(response.data);
+      if (buffer.length < 4 || !buffer.toString('ascii', 0, 4).includes('%PDF')) {
+        // Might be HTML redirect page, try alternative method
+        if (url.includes('drive.google.com')) {
+          return await this.downloadGoogleDriveAlternative(url);
+        }
+        throw new Error('Downloaded content is not a valid PDF');
+      }
+      
+      return buffer;
+    } catch (error) {
+      console.error('Download failed:', error.message);
+      if (url.includes('drive.google.com')) {
+        console.log('Trying alternative Google Drive method...');
+        return await this.downloadGoogleDriveAlternative(url);
+      }
+      throw error;
+    }
   }
 
   convertToDirectDownload(url) {
+    console.log('Converting URL:', url);
+    
     // Convert Google Drive sharing links to direct download
     if (url.includes('drive.google.com/file/d/')) {
       const fileId = url.match(/\/file\/d\/([a-zA-Z0-9-_]+)/)?.[1];
       if (fileId) {
-        return `https://drive.google.com/uc?export=download&id=${fileId}`;
+        const directUrl = `https://drive.google.com/uc?export=download&id=${fileId}&confirm=t`;
+        console.log('Converted to:', directUrl);
+        return directUrl;
+      }
+    }
+    
+    // Handle Google Drive open links
+    if (url.includes('drive.google.com/open?id=')) {
+      const fileId = url.match(/[?&]id=([a-zA-Z0-9-_]+)/)?.[1];
+      if (fileId) {
+        const directUrl = `https://drive.google.com/uc?export=download&id=${fileId}&confirm=t`;
+        console.log('Converted to:', directUrl);
+        return directUrl;
       }
     }
     
     // Convert Dropbox sharing links
     if (url.includes('dropbox.com') && url.includes('?dl=0')) {
       return url.replace('?dl=0', '?dl=1');
+    }
+    
+    // Handle Dropbox scl links
+    if (url.includes('dropbox.com/scl/')) {
+      return url + (url.includes('?') ? '&' : '?') + 'dl=1';
+    }
+    
+    // Handle OneDrive links
+    if (url.includes('onedrive.live.com') || url.includes('1drv.ms')) {
+      return url.replace('/view?', '/download?');
     }
     
     return url;
@@ -203,6 +277,31 @@ class PDFMerger {
     windows.forEach(window => {
       window.webContents.send('merge-progress', progressData);
     });
+  }
+
+  async downloadGoogleDriveAlternative(url) {
+    const fileId = url.match(/\/file\/d\/([a-zA-Z0-9-_]+)/)?.[1] || url.match(/[?&]id=([a-zA-Z0-9-_]+)/)?.[1];
+    if (!fileId) throw new Error('Could not extract Google Drive file ID');
+    
+    // Try the alternative download URL
+    const altUrl = `https://docs.google.com/uc?export=download&id=${fileId}`;
+    console.log('Trying alternative URL:', altUrl);
+    
+    const response = await axios.get(altUrl, {
+      responseType: 'arraybuffer',
+      timeout: 60000,
+      maxRedirects: 10,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+    
+    const buffer = Buffer.from(response.data);
+    if (buffer.length < 4 || !buffer.toString('ascii', 0, 4).includes('%PDF')) {
+      throw new Error('Google Drive file is not accessible or not a PDF. Make sure the file is publicly shared.');
+    }
+    
+    return buffer;
   }
 
   cleanup() {
